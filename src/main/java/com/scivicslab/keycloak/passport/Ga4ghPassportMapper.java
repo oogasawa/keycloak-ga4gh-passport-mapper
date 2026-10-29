@@ -16,8 +16,9 @@ import org.keycloak.representations.AccessToken;
 
 /**
  * A Protocol Mapper that makes Keycloak a GA4GH Passport Broker: when the UserInfo Endpoint answers, it asks a
- * Visa issuer for the Visas of the user and puts them, as an array of Visa JWTs, in the claim
- * {@code ga4gh_passport_v1}. It acts on the UserInfo Endpoint only, never on the ID token or the access token
+ * Visa issuer for the Visas of the user and adds them, as Visa JWTs, to the array in the claim
+ * {@code ga4gh_passport_v1}. Several Mappers of this class, each with the URL of its own Visa issuer, collect the
+ * Visas of all the issuers into one Passport. It acts on the UserInfo Endpoint only, never on the ID token or the access token
  * (a Passport-Scoped Access Token must not carry GA4GH claims). Attach it to a client scope named
  * {@code ga4gh_passport_v1} that the Relying Party requests as an optional scope.
  */
@@ -88,7 +89,9 @@ public class Ga4ghPassportMapper extends AbstractOIDCProtocolMapper implements U
         String username = userSession.getUser().getUsername();
         try {
             int timeout = Integer.parseInt(mappingModel.getConfig().getOrDefault(CONFIG_TIMEOUT, "5"));
-            token.getOtherClaims().put(CLAIM, FETCHER.fetch(PassportFetcher.urlFor(template, username), timeout));
+            List<String> visas = FETCHER.fetch(PassportFetcher.urlFor(template, username), timeout);
+            // The Visas of the Mappers that ran before this one stay: a Passport collects the Visas of every issuer.
+            token.getOtherClaims().put(CLAIM, PassportClaim.merge(token.getOtherClaims().get(CLAIM), visas));
         } catch (Exception e) {
             // No Visas is a safe answer: the Passport Clearinghouse then grants nothing.
             LOG.warnf("Visas of %s could not be fetched; the claim is not set: %s", username, e.toString());
