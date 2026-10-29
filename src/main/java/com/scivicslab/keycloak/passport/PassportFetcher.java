@@ -26,6 +26,14 @@ public final class PassportFetcher {
             .connectTimeout(Duration.ofSeconds(3))
             .build();
 
+    /** The URL templates of the Visa issuers: one per line of the setting; blank lines are not issuers. */
+    public static List<String> urlTemplates(String setting) {
+        if (setting == null) {
+            return List.of();
+        }
+        return setting.lines().map(String::strip).filter(line -> !line.isEmpty()).toList();
+    }
+
     /** The URL of a user's Passport: the template with {username} replaced by the URL-encoded user name. */
     public static String urlFor(String template, String username) {
         // URLEncoder writes a space as "+", which is a space only in a query string; in a path it must be %20.

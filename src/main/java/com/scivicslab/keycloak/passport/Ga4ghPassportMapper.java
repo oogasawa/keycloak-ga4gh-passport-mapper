@@ -2,6 +2,9 @@ package com.scivicslab.keycloak.passport;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import org.jboss.logging.Logger;
 import org.keycloak.models.ClientSessionContext;
@@ -31,14 +34,16 @@ public class Ga4ghPassportMapper extends AbstractOIDCProtocolMapper implements U
 
     private static final Logger LOG = Logger.getLogger(Ga4ghPassportMapper.class);
     private static final PassportFetcher FETCHER = new PassportFetcher();
+    private static final ExecutorService ISSUER_CALLS = Executors.newVirtualThreadPerTaskExecutor();
     private static final List<ProviderConfigProperty> CONFIG = new ArrayList<>();
 
     static {
         ProviderConfigProperty url = new ProviderConfigProperty();
         url.setName(CONFIG_URL);
-        url.setLabel("Passport URL");
-        url.setType(ProviderConfigProperty.STRING_TYPE);
-        url.setHelpText("URL that answers {\"ga4gh_passport_v1\": [...]} for a user. {username} is replaced by the user name.");
+        url.setLabel("Passport URLs (one per line)");
+        url.setType(ProviderConfigProperty.TEXT_TYPE);
+        url.setHelpText("URLs of the Visa issuers, one per line. Each URL answers {\"ga4gh_passport_v1\": [...]} for a user; "
+                + "{username} is replaced by the user name. The Visas of all the issuers go into one Passport, in the order of the lines.");
         CONFIG.add(url);
         ProviderConfigProperty timeout = new ProviderConfigProperty();
         timeout.setName(CONFIG_TIMEOUT);
@@ -81,21 +86,42 @@ public class Ga4ghPassportMapper extends AbstractOIDCProtocolMapper implements U
         if (!OIDCAttributeMapperHelper.includeInUserInfo(mappingModel)) {
             return token;
         }
-        String template = mappingModel.getConfig().get(CONFIG_URL);
-        if (template == null || template.isBlank()) {
+        List<String> templates = PassportFetcher.urlTemplates(mappingModel.getConfig().get(CONFIG_URL));
+        if (templates.isEmpty()) {
             LOG.warn("The GA4GH Passport mapper has no Passport URL; the claim is not set");
             return token;
         }
         String username = userSession.getUser().getUsername();
-        try {
-            int timeout = Integer.parseInt(mappingModel.getConfig().getOrDefault(CONFIG_TIMEOUT, "5"));
-            List<String> visas = FETCHER.fetch(PassportFetcher.urlFor(template, username), timeout);
+        int timeout = Integer.parseInt(mappingModel.getConfig().getOrDefault(CONFIG_TIMEOUT, "5"));
+        // The issuers are asked at the same time, so the wait is that of the slowest one, not the sum.
+        List<CompletableFuture<List<String>>> answers = templates.stream()
+                .map(template -> CompletableFuture.supplyAsync(() -> fetchOrNothing(template, username, timeout), ISSUER_CALLS))
+                .toList();
+        List<String> visas = new ArrayList<>();
+        boolean anyIssuerAnswered = false;
+        for (CompletableFuture<List<String>> answer : answers) {
+            List<String> fromOneIssuer = answer.join();
+            if (fromOneIssuer != null) {
+                anyIssuerAnswered = true;
+                visas = PassportClaim.merge(visas, fromOneIssuer);
+            }
+        }
+        // No Visas is a safe answer: the Passport Clearinghouse then grants nothing. When no issuer answered, the claim
+        // is left as the Mappers before this one made it.
+        if (anyIssuerAnswered) {
             // The Visas of the Mappers that ran before this one stay: a Passport collects the Visas of every issuer.
             token.getOtherClaims().put(CLAIM, PassportClaim.merge(token.getOtherClaims().get(CLAIM), visas));
-        } catch (Exception e) {
-            // No Visas is a safe answer: the Passport Clearinghouse then grants nothing.
-            LOG.warnf("Visas of %s could not be fetched; the claim is not set: %s", username, e.toString());
         }
         return token;
+    }
+
+    /** The Visas one issuer answers, or null when the issuer does not answer a Passport. */
+    private static List<String> fetchOrNothing(String template, String username, int timeoutSeconds) {
+        try {
+            return FETCHER.fetch(PassportFetcher.urlFor(template, username), timeoutSeconds);
+        } catch (Exception e) {
+            LOG.warnf("Visas of %s could not be fetched from %s: %s", username, template, e.toString());
+            return null;
+        }
     }
 }

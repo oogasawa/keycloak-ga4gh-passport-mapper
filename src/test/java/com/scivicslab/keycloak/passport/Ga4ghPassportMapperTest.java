@@ -79,6 +79,23 @@ class Ga4ghPassportMapperTest {
         mapper.transformUserInfoToken(token, mapperFor(issuer), null, sessionOf("alice"), null);
     }
 
+    private static ProtocolMapperModel mapperForUrls(String... urls) {
+        ProtocolMapperModel model = new ProtocolMapperModel();
+        model.setConfig(Map.of(
+                Ga4ghPassportMapper.CONFIG_URL, String.join("\n", urls),
+                Ga4ghPassportMapper.CONFIG_TIMEOUT, "3",
+                "userinfo.token.claim", "true"));
+        return model;
+    }
+
+    private static String urlOf(HttpServer server) {
+        return "http://127.0.0.1:" + server.getAddress().getPort() + "/passport/{username}";
+    }
+
+    private void runUrls(Ga4ghPassportMapper mapper, AccessToken token, String... urls) {
+        mapper.transformUserInfoToken(token, mapperForUrls(urls), null, sessionOf("alice"), null);
+    }
+
     @Test
     void twoMappersCollectTheVisasOfTheirIssuersIntoOnePassport() {
         AccessToken token = new AccessToken();
@@ -103,6 +120,56 @@ class Ga4ghPassportMapperTest {
     void aFailingIssuerAloneSetsNoClaim() {
         AccessToken token = new AccessToken();
         run(new Ga4ghPassportMapper(), token, failingIssuer);
+
+        assertFalse(token.getOtherClaims().containsKey(Ga4ghPassportMapper.CLAIM));
+    }
+
+    @Test
+    void oneMapperWithTheUrlsOfTwoIssuersOnSeparateLinesCollectsBoth() {
+        AccessToken token = new AccessToken();
+        runUrls(new Ga4ghPassportMapper(), token, urlOf(issuerOne), urlOf(issuerTwo));
+
+        assertEquals(List.of("one.a.a", "shared.s.s", "two.b.b"), claimOf(token));
+    }
+
+    @Test
+    void theVisasFollowTheOrderOfTheUrls() {
+        AccessToken token = new AccessToken();
+        runUrls(new Ga4ghPassportMapper(), token, urlOf(issuerTwo), urlOf(issuerOne));
+
+        assertEquals(List.of("two.b.b", "shared.s.s", "one.a.a"), claimOf(token));
+    }
+
+    @Test
+    void anIssuerThatFailsLeavesTheVisasOfTheOtherUrlsOfTheSameMapper() {
+        AccessToken token = new AccessToken();
+        runUrls(new Ga4ghPassportMapper(), token, urlOf(failingIssuer), urlOf(issuerOne));
+
+        assertEquals(List.of("one.a.a", "shared.s.s"), claimOf(token));
+    }
+
+    @Test
+    void blankLinesBetweenTheUrlsAreIgnored() {
+        AccessToken token = new AccessToken();
+        runUrls(new Ga4ghPassportMapper(), token, "", urlOf(issuerOne), "   ", urlOf(issuerTwo), "");
+
+        assertEquals(List.of("one.a.a", "shared.s.s", "two.b.b"), claimOf(token));
+    }
+
+    @Test
+    void whenEveryIssuerOfAMapperFailsTheVisasAlreadyInTheClaimStay() {
+        AccessToken token = new AccessToken();
+        Ga4ghPassportMapper mapper = new Ga4ghPassportMapper();
+        run(mapper, token, issuerOne);
+        runUrls(mapper, token, urlOf(failingIssuer), urlOf(failingIssuer));
+
+        assertEquals(List.of("one.a.a", "shared.s.s"), claimOf(token));
+    }
+
+    @Test
+    void aMapperWithNoUrlSetsNoClaim() {
+        AccessToken token = new AccessToken();
+        runUrls(new Ga4ghPassportMapper(), token, "  ");
 
         assertFalse(token.getOtherClaims().containsKey(Ga4ghPassportMapper.CLAIM));
     }
